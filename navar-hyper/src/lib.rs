@@ -1,3 +1,23 @@
+//! # Hyper Application Plugin
+//!
+//! This module provides an `ApplicationPlugin` implementation built on top of
+//! the `hyper` HTTP client connection machinery.
+//!
+//! It supports:
+//!
+//! - HTTP/1.1 and HTTP/2
+//! - Automatic protocol selection via ALPN
+//! - Integration with `navar` transports through `BidiStream`
+//! - Runtime-agnostic operation using Tokio compatibility layers
+//!
+//! This plugin is intended to be used with transports such as:
+//!
+//! - Tokio TCP/TLS transport
+//! - Iroh QUIC transport
+//!
+//! The plugin produces a `Session` that can send HTTP requests and receive
+//! responses using Hyper’s client implementation.
+
 use std::future::Future;
 use std::{error::Error as StdError, pin::Pin};
 
@@ -16,29 +36,47 @@ use navar::{
     transport::{BidiStream, Connection},
 };
 
+/// Boxed HTTP body type used for outgoing Hyper requests.
 type DynBody = navar::http_body_util::combinators::BoxBody<
     navar::bytes::Bytes,
     Box<dyn StdError + Send + Sync>,
 >;
 
+/// Response body type returned by Hyper.
 type HyperResBody = hyper::body::Incoming;
 
+/// Boxed background driver future returned by the handshake.
 type BoxedFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// Supported HTTP protocol versions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Protocol {
+    /// Automatically select the protocol (default).
+    ///
+    /// HTTP/2 is preferred when ALPN negotiation indicates support,
+    /// otherwise HTTP/1.1 is used.
     #[default]
     Auto,
+
+    /// Force HTTP/1.1.
     Http1,
+
+    /// Force HTTP/2.
     Http2,
 }
 
-/// Helper to bridge navar/futures-lite IO to Tokio IO
+/// Bridges a `navar` bidirectional stream into a Tokio-compatible I/O object.
+///
+/// This allows Hyper to operate over arbitrary transports implementing
+/// [`BidiStream`].
 fn prepare_io<I: BidiStream>(io: I) -> TokioIo<Compat<I>> {
     TokioIo::new(io.compat())
 }
 
-/// Helper to box any valid body into our DynBody type
+/// Converts an arbitrary request body into Hyper’s boxed body type.
+///
+/// This ensures a uniform body representation regardless of the original
+/// body type used by the caller.
 fn convert_body<B>(body: B) -> DynBody
 where
     B: Body + Send + Sync + Unpin + 'static,
@@ -50,9 +88,12 @@ where
         .boxed()
 }
 
-/// A unified sender that wraps either an H1 or H2 connection.
+/// A unified HTTP sender wrapping either an HTTP/1.1 or HTTP/2 Hyper connection.
 pub enum HyperSender {
+    /// HTTP/1.1 sender.
     H1(http1::SendRequest<DynBody>),
+
+    /// HTTP/2 sender.
     H2(http2::SendRequest<DynBody>),
 }
 
@@ -68,12 +109,12 @@ impl Session for HyperSender {
         B::Data: Send,
         B::Error: Into<Box<dyn StdError + Send + Sync + 'static>>,
     {
-        // 1. Convert the body to the DynBody type expected by Hyper
+        // Convert the request body into the boxed Hyper body type
         let (parts, body) = request.into_parts();
         let boxed_body = convert_body(body);
         let req = Request::from_parts(parts, boxed_body);
 
-        // 2. Dispatch based on the active protocol
+        // Dispatch based on the negotiated protocol
         match self {
             HyperSender::H1(sender) => {
                 sender.ready().await?;
@@ -87,18 +128,22 @@ impl Session for HyperSender {
     }
 }
 
+/// Hyper-based application plugin.
+///
+/// This plugin performs an HTTP handshake over a `navar` connection and
+/// produces a [`Session`] capable of sending HTTP requests.
 #[derive(Clone, Default)]
 pub struct HyperApp {
     protocol: Protocol,
 }
 
 impl HyperApp {
-    /// Create a new HyperApp with default configuration (Auto)
+    /// Creates a new `HyperApp` using automatic protocol selection.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Configure the expected protocol version
+    /// Configures the HTTP protocol version to use.
     pub fn with_protocol(mut self, protocol: Protocol) -> Self {
         self.protocol = protocol;
         self
@@ -116,23 +161,19 @@ where
         &self,
         conn: C,
     ) -> anyhow::Result<(Self::Session, impl Future<Output = ()> + Send + 'static)> {
-        // 1. Obtain the stream from the connection handle.
-        // For TCP, this performs the actual socket dial.
-        // For Iroh/QUIC, this opens a bidirectional stream.
+        // 1. Open a bidirectional stream on the connection
         let io = conn.open_bidirectional().await?;
 
-        // 2. Determine which protocol to use based on ALPN (if available)
+        // 2. Determine the protocol based on configuration and ALPN
         let alpn = io.alpn_protocol();
-
         let use_h2 = match (self.protocol, alpn) {
             (Protocol::Http2, _) => true,
             (Protocol::Http1, _) => false,
-            // If Auto, prefer H2 if ALPN says so, otherwise fallback to H1
             (Protocol::Auto, Some(b"h2")) => true,
             (Protocol::Auto, _) => false,
         };
 
-        // 3. Wrap the stream in the Tokio compatibility layer
+        // 3. Adapt the stream for Tokio/Hyper
         let hyper_io = prepare_io(io);
 
         // 4. Perform the Hyper handshake
@@ -141,10 +182,9 @@ where
             let (sender, conn) = http2::Builder::new(executor).handshake(hyper_io).await?;
 
             let session = HyperSender::H2(sender);
-
             let driver = Box::pin(async move {
                 if let Err(e) = conn.await {
-                    eprintln!("Hyper H2 connection error: {:?}", e);
+                    eprintln!("Hyper HTTP/2 connection error: {:?}", e);
                 }
             });
 
@@ -153,10 +193,9 @@ where
             let (sender, conn) = http1::handshake(hyper_io).await?;
 
             let session = HyperSender::H1(sender);
-
             let driver = Box::pin(async move {
                 if let Err(e) = conn.await {
-                    eprintln!("Hyper H1 connection error: {:?}", e);
+                    eprintln!("Hyper HTTP/1.1 connection error: {:?}", e);
                 }
             });
 
