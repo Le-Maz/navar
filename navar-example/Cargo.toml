@@ -9,4 +9,4 @@ navar = {path = ".."}
 navar-tokio = {path = "../navar-tokio"}
 navar-hyper = {path = "../navar-hyper"}
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros"] }
-axum = "0.8.8"
+axum = { version = "0.8.8", features = ["http2"] }
