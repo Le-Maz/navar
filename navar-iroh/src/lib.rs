@@ -1,11 +1,16 @@
 use std::{
+    ops::ControlFlow,
     pin::Pin,
     str::FromStr,
+    sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use anyhow::Context as _;
-use iroh::{EndpointAddr, EndpointId, endpoint::Endpoint};
+use dashmap::{DashMap, mapref::entry::Entry};
+use futures::{Future, FutureExt, future::Shared};
+use iroh::{EndpointId, endpoint::Connection, endpoint::Endpoint};
 use navar::{
     futures_lite::{AsyncRead, AsyncWrite},
     http::Uri,
@@ -13,21 +18,91 @@ use navar::{
 };
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-/// A Transport Plugin that establishes Iroh QUIC connections and returns
-/// bidirectional streams as the transport IO.
+// Define the inner future type explicitly to help the compiler
+type DynFuture = Pin<Box<dyn Future<Output = Result<Connection, Arc<anyhow::Error>>> + Send>>;
+type DialFuture = Shared<DynFuture>;
+
 #[derive(Clone, Debug)]
 pub struct IrohTransport {
     endpoint: Endpoint,
     alpns: Vec<Vec<u8>>,
+    connection_cache: Arc<DashMap<EndpointId, DialFuture>>,
 }
 
 impl IrohTransport {
-    /// Create a new Iroh transport using an existing Endpoint.
-    ///
-    /// - `endpoint`: The Iroh endpoint to use for connecting.
-    /// - `alpns`: ALPN protocols to negotiate (e.g., b"n0/navar").
     pub fn new(endpoint: Endpoint, alpns: Vec<Vec<u8>>) -> Self {
-        Self { endpoint, alpns }
+        Self {
+            endpoint,
+            alpns,
+            connection_cache: Arc::new(DashMap::new()),
+        }
+    }
+
+    async fn get_connection(&self, peer_id: EndpointId) -> anyhow::Result<Connection> {
+        loop {
+            let action = {
+                let entry = self.connection_cache.entry(peer_id);
+                match entry {
+                    Entry::Occupied(entry) => ControlFlow::Continue(entry.get().clone()),
+                    Entry::Vacant(entry) => {
+                        let future = self.create_dial_future(peer_id);
+                        entry.insert(future.clone());
+                        ControlFlow::Break(future)
+                    }
+                }
+            };
+
+            match action {
+                ControlFlow::Continue(shared_future) => match shared_future.await {
+                    Ok(conn) => return Ok(conn),
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        continue;
+                    }
+                },
+                ControlFlow::Break(shared_future) => {
+                    return match shared_future.await {
+                        Ok(conn) => Ok(conn),
+                        Err(err) => {
+                            self.connection_cache.remove(&peer_id);
+                            Err(anyhow::anyhow!(err))
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    fn create_dial_future(&self, peer_id: EndpointId) -> DialFuture {
+        let endpoint = self.endpoint.clone();
+        // Ensure ALPN is owned for the 'move' closure
+        let alpn = self
+            .alpns
+            .first()
+            .map(|v| v.as_slice())
+            .unwrap_or(b"n0/navar")
+            .to_vec();
+
+        let cache = self.connection_cache.clone();
+
+        let fut = async move {
+            let conn = endpoint
+                .connect(peer_id, &alpn)
+                .await
+                .map_err(|e| Arc::new(e.into()))?;
+
+            let monitor_conn = conn.clone();
+            tokio::spawn(async move {
+                let _ = monitor_conn.closed().await;
+                cache.remove(&peer_id);
+            });
+
+            Ok(conn)
+        };
+
+        // Explicitly cast to the specific DynFuture type BEFORE calling .shared()
+        let dyn_fut: DynFuture = Box::pin(fut);
+        dyn_fut.shared()
     }
 }
 
@@ -35,45 +110,20 @@ impl TransportPlugin for IrohTransport {
     type Io = IrohStream;
 
     async fn connect(&self, uri: &Uri) -> anyhow::Result<Self::Io> {
-        // 1. Parse the destination from the URI
         let pubkey_str = uri.host().context("URI missing host (Iroh Public Key)")?;
-        let public_key = EndpointId::from_str(pubkey_str).context("Invalid Iroh Public Key")?;
+        let remote_id = EndpointId::from_str(pubkey_str).context("Invalid Iroh Public Key")?;
 
-        // Construct EndpointAddr.
-        // NOTE: This assumes direct connectivity or DERP assistance via the key alone.
-        // If specific relay URLs are needed, they would need to be parsed from the URI path or config.
-        let addr = EndpointAddr::from_parts(public_key, vec![]);
+        let connection = self.get_connection(remote_id).await?;
 
-        // 2. Select ALPN
-        let alpn = self
-            .alpns
-            .first()
-            .map(|v| v.as_slice())
-            .unwrap_or(b"n0/navar");
-
-        // 3. Connect to the peer (Establish QUIC Connection)
-        // TODO: In a production environment, you likely want to cache/pool this connection
-        // struct to reuse it for multiple streams, rather than performing a full
-        // QUIC handshake for every single request.
-        let connection = self
-            .endpoint
-            .connect(addr, alpn)
-            .await
-            .context("Iroh connect failed")?;
-
-        // 4. Open a Bidirectional Stream (The "IO")
         let (send, recv) = connection
             .open_bi()
             .await
             .context("Failed to open stream")?;
 
-        // 5. Wrap in our compatibility struct
         Ok(IrohStream::new(send, recv))
     }
 }
 
-/// A wrapper around Iroh's SendStream and RecvStream that implements
-/// the standard AsyncRead/AsyncWrite traits required by Navar.
 pub struct IrohStream {
     send: Compat<iroh::endpoint::SendStream>,
     recv: Compat<iroh::endpoint::RecvStream>,
@@ -82,14 +132,12 @@ pub struct IrohStream {
 impl IrohStream {
     pub fn new(send: iroh::endpoint::SendStream, recv: iroh::endpoint::RecvStream) -> Self {
         Self {
-            // Convert tokio::io traits to futures_lite::io traits via Compat
             send: send.compat_write(),
             recv: recv.compat(),
         }
     }
 }
 
-// Implement AsyncRead by delegating to the receive half
 impl AsyncRead for IrohStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -100,7 +148,6 @@ impl AsyncRead for IrohStream {
     }
 }
 
-// Implement AsyncWrite by delegating to the send half
 impl AsyncWrite for IrohStream {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -119,11 +166,4 @@ impl AsyncWrite for IrohStream {
     }
 }
 
-impl TransportIo for IrohStream {
-    // Iroh streams don't strictly have an ALPN themselves (the connection does),
-    // but typically TransportIo doesn't strictly require this method unless used
-    // for protocol negotiation logic higher up.
-    fn alpn_protocol(&self) -> Option<&[u8]> {
-        None
-    }
-}
+impl TransportIo for IrohStream {}
