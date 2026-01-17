@@ -25,7 +25,7 @@ pub mod transport;
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A helper type alias to extract the response body type from the Application plugin.
-/// 
+///
 /// Requires the Application type (A) and the Connection type (C) it acts upon.
 pub type ResponseBody<A, C> = <<A as ApplicationPlugin<C>>::Session as Session>::ResBody;
 
@@ -59,6 +59,17 @@ where
     type Error = B::Error;
 }
 
+/// Result of sending a request
+#[allow(type_alias_bounds)]
+pub type SendRequestResult<D: Dispatch> =
+    anyhow::Result<Response<ResponseBody<D::App, <D::Transport as TransportPlugin>::Conn>>>;
+
+/// Future created by sending a request
+pub trait SendRequestFuture<D: Dispatch>: Future<Output = SendRequestResult<D>> + Send {}
+
+impl<F, D: Dispatch> SendRequestFuture<D> for F where F: Future<Output = SendRequestResult<D>> + Send
+{}
+
 /// Defines the capability to dispatch HTTP requests.
 pub trait Dispatch: Send + Sync + Clone {
     /// The transport mechanism (e.g., TCP, TLS, Iroh).
@@ -72,10 +83,7 @@ pub trait Dispatch: Send + Sync + Clone {
     type Runtime: AsyncRuntime;
 
     /// Connects to the remote, performs the handshake, and sends the request.
-    fn send<B>(
-        &self,
-        request: Request<B>,
-    ) -> impl Future<Output = anyhow::Result<Response<ResponseBody<Self::App, <Self::Transport as TransportPlugin>::Conn>>>> + Send
+    fn send<B>(&self, request: Request<B>) -> impl SendRequestFuture<Self>
     where
         B: RequestBody;
 }
@@ -161,13 +169,13 @@ where
     type App = A;
     type Runtime = R;
 
-    async fn send<B>(&self, req: Request<B>) -> anyhow::Result<Response<ResponseBody<Self::App, T::Conn>>>
+    async fn send<B>(&self, req: Request<B>) -> SendRequestResult<Self>
     where
         B: RequestBody,
     {
         // Get the Generic Connection (could be a Stream or a QUIC Session)
         let conn = self.inner.transport.connect(req.uri()).await?;
-        
+
         // Handshake consumes the connection
         let (mut session, driver) = self.inner.app.handshake(conn).await?;
 
@@ -202,6 +210,11 @@ impl<D: Dispatch> BoundRequestBuilder<D> {
             client: self.client,
         })
     }
+
+    /// Executes the HTTP request.
+    pub async fn send(self) -> SendRequestResult<D> {
+        self.build()?.send().await
+    }
 }
 
 /// A fully formed HTTP request awaiting execution.
@@ -219,7 +232,7 @@ where
     B: RequestBody,
 {
     /// Executes the HTTP request.
-    pub async fn send(self) -> anyhow::Result<Response<ResponseBody<D::App, <D::Transport as TransportPlugin>::Conn>>> {
+    pub async fn send(self) -> SendRequestResult<D> {
         self.client.send(self.request).await
     }
 }
