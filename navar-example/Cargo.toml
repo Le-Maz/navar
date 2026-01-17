@@ -6,7 +6,12 @@ publish = false
 
 [dependencies]
 navar = {path = ".."}
-navar-tokio = {path = "../navar-tokio"}
+navar-tokio = {path = "../navar-tokio", features = ["tls"]}
 navar-hyper = {path = "../navar-hyper"}
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros"] }
 axum = { version = "0.8.8", features = ["http2"] }
+tokio-rustls = "0.26.4"
+rustls = "0.23.36"
+rustls-pemfile = "2.2.0"
+rcgen = "0.14.6"
+hyper-util = "0.1.19"

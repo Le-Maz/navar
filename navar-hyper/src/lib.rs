@@ -1,5 +1,5 @@
-use std::error::Error as StdError;
 use std::future::Future;
+use std::{error::Error as StdError, pin::Pin};
 
 use hyper::{
     body::Buf,
@@ -23,7 +23,22 @@ type DynBody = navar::http_body_util::combinators::BoxBody<
 
 type HyperResBody = hyper::body::Incoming;
 
-/// Centralizes the logic for mapping any valid Body to our DynBody
+type BoxedFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Protocol {
+    #[default]
+    Auto,
+    Http1,
+    Http2,
+}
+
+/// Helper to bridge navar/futures-lite IO to Tokio IO
+fn prepare_io<I: TransportIo>(io: I) -> TokioIo<Compat<I>> {
+    TokioIo::new(io.compat())
+}
+
+/// Helper to box any valid body into our DynBody type
 fn convert_body<B>(body: B) -> DynBody
 where
     B: Body + Send + Sync + Unpin + 'static,
@@ -35,51 +50,13 @@ where
         .boxed()
 }
 
-/// Centralizes the IO compatibility layer
-fn prepare_io<I: TransportIo>(io: I) -> TokioIo<Compat<I>> {
-    TokioIo::new(io.compat())
+/// A unified sender that wraps either an H1 or H2 connection.
+pub enum HyperSender {
+    H1(http1::SendRequest<DynBody>),
+    H2(http2::SendRequest<DynBody>),
 }
 
-/// A helper trait to unify http1::SendRequest and http2::SendRequest.
-trait HyperSender: Send + 'static {
-    fn ready(&mut self) -> impl Future<Output = hyper::Result<()>> + Send;
-    fn send_request(
-        &mut self,
-        req: Request<DynBody>,
-    ) -> impl Future<Output = hyper::Result<Response<HyperResBody>>> + Send;
-}
-
-impl HyperSender for http1::SendRequest<DynBody> {
-    async fn ready(&mut self) -> hyper::Result<()> {
-        http1::SendRequest::ready(self).await
-    }
-
-    async fn send_request(
-        &mut self,
-        req: Request<DynBody>,
-    ) -> hyper::Result<Response<HyperResBody>> {
-        http1::SendRequest::send_request(self, req).await
-    }
-}
-
-impl HyperSender for http2::SendRequest<DynBody> {
-    async fn ready(&mut self) -> hyper::Result<()> {
-        http2::SendRequest::ready(self).await
-    }
-
-    async fn send_request(
-        &mut self,
-        req: Request<DynBody>,
-    ) -> hyper::Result<Response<HyperResBody>> {
-        http2::SendRequest::send_request(self, req).await
-    }
-}
-
-pub struct HyperSession<S> {
-    sender: S,
-}
-
-impl<S: HyperSender> Session for HyperSession<S> {
+impl Session for HyperSender {
     type ResBody = HyperResBody;
 
     async fn send_request<B>(
@@ -91,64 +68,90 @@ impl<S: HyperSender> Session for HyperSession<S> {
         B::Data: Send,
         B::Error: Into<Box<dyn StdError + Send + Sync + 'static>>,
     {
+        // 1. Convert the body to the DynBody type expected by Hyper
         let (parts, body) = request.into_parts();
         let boxed_body = convert_body(body);
         let req = Request::from_parts(parts, boxed_body);
 
-        self.sender.ready().await?;
-        let resp = self.sender.send_request(req).await?;
-        Ok(resp)
+        // 2. Dispatch based on the active protocol
+        match self {
+            HyperSender::H1(sender) => {
+                sender.ready().await?;
+                Ok(sender.send_request(req).await?)
+            }
+            HyperSender::H2(sender) => {
+                sender.ready().await?;
+                Ok(sender.send_request(req).await?)
+            }
+        }
     }
 }
 
 #[derive(Clone, Default)]
-pub struct HyperH1App;
+pub struct HyperApp {
+    protocol: Protocol,
+}
 
-impl ApplicationPlugin for HyperH1App {
-    type Session = HyperSession<http1::SendRequest<DynBody>>;
+impl HyperApp {
+    /// Create a new HyperApp with default configuration (Auto)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configure the expected protocol version
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+}
+
+impl ApplicationPlugin for HyperApp {
+    type Session = HyperSender;
 
     async fn handshake(
         &self,
         io: impl TransportIo,
     ) -> anyhow::Result<(Self::Session, impl Future<Output = ()> + Send + 'static)> {
-        let hyper_io = prepare_io(io);
-        let (sender, conn) = http1::handshake(hyper_io).await?;
+        // 1. Determine which protocol to use
+        let alpn = io.alpn_protocol();
 
-        let session = HyperSession { sender };
-
-        let driver = async move {
-            if let Err(err) = conn.await {
-                eprintln!("H1 Connection driver error: {:?}", err);
-            }
+        let use_h2 = match (self.protocol, alpn) {
+            (Protocol::Http2, _) => true,
+            (Protocol::Http1, _) => false,
+            // If Auto, prefer H2 if ALPN says so, otherwise fallback to H1
+            (Protocol::Auto, Some(b"h2")) => true,
+            (Protocol::Auto, _) => false,
         };
 
-        Ok((session, driver))
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct HyperH2App;
-
-impl ApplicationPlugin for HyperH2App {
-    type Session = HyperSession<http2::SendRequest<DynBody>>;
-
-    async fn handshake(
-        &self,
-        io: impl TransportIo,
-    ) -> anyhow::Result<(Self::Session, impl Future<Output = ()> + Send + 'static)> {
         let hyper_io = prepare_io(io);
-        let executor = TokioExecutor::new();
 
-        let (sender, conn) = http2::Builder::new(executor).handshake(hyper_io).await?;
+        // 2. Perform the handshake
+        if use_h2 {
+            let executor = TokioExecutor::new();
+            let (sender, conn) = http2::Builder::new(executor).handshake(hyper_io).await?;
 
-        let session = HyperSession { sender };
+            let session = HyperSender::H2(sender);
 
-        let driver = async move {
-            if let Err(err) = conn.await {
-                eprintln!("H2 Connection driver error: {:?}", err);
-            }
-        };
+            // Box the driver future to erase the specific type (H1 vs H2 connection)
+            let driver = Box::pin(async move {
+                if let Err(e) = conn.await {
+                    eprintln!("Hyper H2 connection error: {:?}", e);
+                }
+            });
 
-        Ok((session, driver))
+            Ok((session, driver as BoxedFuture))
+        } else {
+            let (sender, conn) = http1::handshake(hyper_io).await?;
+
+            let session = HyperSender::H1(sender);
+
+            let driver = Box::pin(async move {
+                if let Err(e) = conn.await {
+                    eprintln!("Hyper H1 connection error: {:?}", e);
+                }
+            });
+
+            Ok((session, driver as BoxedFuture))
+        }
     }
 }
