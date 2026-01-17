@@ -1,4 +1,3 @@
-use crate::transport::TransportIo;
 use http::{Request, Response};
 use http_body::Body;
 use std::{fmt::Debug, future::Future};
@@ -19,12 +18,13 @@ where
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>;
 }
 
-pub trait ApplicationPlugin: Send + Sync + 'static {
+/// A generic Application Plugin.
+pub trait ApplicationPlugin<C>: Send + Sync + 'static {
     type Session: Session;
 
     fn handshake(
         &self,
-        io: impl TransportIo,
+        conn: C,
     ) -> impl Future<
         Output = anyhow::Result<(Self::Session, impl Future<Output = ()> + Send + 'static)>,
     > + Send;

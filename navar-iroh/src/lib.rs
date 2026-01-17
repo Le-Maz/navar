@@ -10,16 +10,15 @@ use std::{
 use anyhow::Context as _;
 use dashmap::{DashMap, mapref::entry::Entry};
 use futures::{Future, FutureExt, future::Shared};
-use iroh::{EndpointId, endpoint::Connection, endpoint::Endpoint};
+use iroh::{EndpointId, endpoint::Connection as QuicConnection, endpoint::Endpoint};
 use navar::{
     futures_lite::{AsyncRead, AsyncWrite},
     http::Uri,
-    transport::{TransportIo, TransportPlugin},
+    transport::{BidiStream, Connection, Stream, TransportPlugin},
 };
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-// Define the inner future type explicitly to help the compiler
-type DynFuture = Pin<Box<dyn Future<Output = Result<Connection, Arc<anyhow::Error>>> + Send>>;
+type DynFuture = Pin<Box<dyn Future<Output = Result<QuicConnection, Arc<anyhow::Error>>> + Send>>;
 type DialFuture = Shared<DynFuture>;
 
 #[derive(Clone, Debug)]
@@ -28,7 +27,6 @@ pub struct IrohTransport {
     alpns: Vec<Vec<u8>>,
     connection_cache: Arc<DashMap<EndpointId, DialFuture>>,
 }
-
 impl IrohTransport {
     pub fn new(endpoint: Endpoint, alpns: Vec<Vec<u8>>) -> Self {
         Self {
@@ -37,8 +35,8 @@ impl IrohTransport {
             connection_cache: Arc::new(DashMap::new()),
         }
     }
-
-    async fn get_connection(&self, peer_id: EndpointId) -> anyhow::Result<Connection> {
+    // ... get_connection logic ...
+    async fn get_connection(&self, peer_id: EndpointId) -> anyhow::Result<QuicConnection> {
         loop {
             let action = {
                 let entry = self.connection_cache.entry(peer_id);
@@ -51,7 +49,6 @@ impl IrohTransport {
                     }
                 }
             };
-
             match action {
                 ControlFlow::Continue(shared_future) => match shared_future.await {
                     Ok(conn) => return Ok(conn),
@@ -72,98 +69,163 @@ impl IrohTransport {
             }
         }
     }
-
     fn create_dial_future(&self, peer_id: EndpointId) -> DialFuture {
         let endpoint = self.endpoint.clone();
-        // Ensure ALPN is owned for the 'move' closure
         let alpn = self
             .alpns
             .first()
             .map(|v| v.as_slice())
             .unwrap_or(b"n0/navar")
             .to_vec();
-
         let cache = self.connection_cache.clone();
-
         let fut = async move {
             let conn = endpoint
                 .connect(peer_id, &alpn)
                 .await
                 .map_err(|e| Arc::new(e.into()))?;
-
             let monitor_conn = conn.clone();
             tokio::spawn(async move {
                 let _ = monitor_conn.closed().await;
                 cache.remove(&peer_id);
             });
-
             Ok(conn)
         };
-
-        // Explicitly cast to the specific DynFuture type BEFORE calling .shared()
         let dyn_fut: DynFuture = Box::pin(fut);
         dyn_fut.shared()
     }
 }
 
 impl TransportPlugin for IrohTransport {
-    type Io = IrohStream;
-
-    async fn connect(&self, uri: &Uri) -> anyhow::Result<Self::Io> {
-        let pubkey_str = uri.host().context("URI missing host (Iroh Public Key)")?;
+    type Conn = IrohConnection;
+    async fn connect(&self, uri: &Uri) -> anyhow::Result<Self::Conn> {
+        let pubkey_str = uri.host().context("URI missing host")?;
         let remote_id = EndpointId::from_str(pubkey_str).context("Invalid Iroh Public Key")?;
-
         let connection = self.get_connection(remote_id).await?;
-
-        let (send, recv) = connection
-            .open_bi()
-            .await
-            .context("Failed to open stream")?;
-
-        Ok(IrohStream::new(send, recv))
+        Ok(IrohConnection { inner: connection })
     }
 }
 
-pub struct IrohStream {
-    send: Compat<iroh::endpoint::SendStream>,
-    recv: Compat<iroh::endpoint::RecvStream>,
+#[derive(Clone, Debug)]
+pub struct IrohConnection {
+    inner: QuicConnection,
 }
 
-impl IrohStream {
-    pub fn new(send: iroh::endpoint::SendStream, recv: iroh::endpoint::RecvStream) -> Self {
-        Self {
-            send: send.compat_write(),
-            recv: recv.compat(),
-        }
+impl Connection for IrohConnection {
+    type Bidi = IrohBidiStream;
+    type Send = IrohSendStream;
+    type Recv = IrohRecvStream;
+
+    async fn open_bidirectional(&self) -> anyhow::Result<Self::Bidi> {
+        let (send, recv) = self.inner.open_bi().await?;
+        Ok(IrohBidiStream {
+            send: IrohSendStream(send.compat_write()),
+            recv: IrohRecvStream(recv.compat()),
+        })
+    }
+
+    async fn open_unidirectional(&self) -> anyhow::Result<Self::Send> {
+        let send = self.inner.open_uni().await?;
+        Ok(IrohSendStream(send.compat_write()))
+    }
+
+    async fn accept_bidirectional(&self) -> anyhow::Result<Self::Bidi> {
+        let (send, recv) = self.inner.accept_bi().await?;
+        Ok(IrohBidiStream {
+            send: IrohSendStream(send.compat_write()),
+            recv: IrohRecvStream(recv.compat()),
+        })
+    }
+
+    async fn accept_unidirectional(&self) -> anyhow::Result<Self::Recv> {
+        let recv = self.inner.accept_uni().await?;
+        Ok(IrohRecvStream(recv.compat()))
+    }
+
+    fn alpn_protocol(&self) -> Option<&[u8]> {
+        Some(self.inner.alpn())
     }
 }
 
-impl AsyncRead for IrohStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().recv).poll_read(cx, buf)
+// --- Streams ---
+
+pub struct IrohSendStream(Compat<iroh::endpoint::SendStream>);
+impl Stream for IrohSendStream {
+    fn stream_id(&self) -> u64 {
+        self.0.get_ref().id().index()
     }
 }
-
-impl AsyncWrite for IrohStream {
+impl AsyncWrite for IrohSendStream {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().send).poll_write(cx, buf)
+        Pin::new(&mut self.0).poll_write(cx, buf)
     }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().send).poll_flush(cx)
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
     }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().send).poll_close(cx)
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_close(cx)
     }
 }
 
-impl TransportIo for IrohStream {}
+pub struct IrohRecvStream(Compat<iroh::endpoint::RecvStream>);
+impl Stream for IrohRecvStream {
+    fn stream_id(&self) -> u64 {
+        self.0.get_ref().id().index()
+    }
+}
+impl AsyncRead for IrohRecvStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+pub struct IrohBidiStream {
+    send: IrohSendStream,
+    recv: IrohRecvStream,
+}
+impl Stream for IrohBidiStream {
+    fn stream_id(&self) -> u64 {
+        self.send.stream_id()
+    }
+}
+impl AsyncRead for IrohBidiStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.recv).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for IrohBidiStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.send).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.send).poll_flush(cx)
+    }
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.send).poll_close(cx)
+    }
+}
+impl BidiStream for IrohBidiStream {
+    type Send = IrohSendStream;
+    type Recv = IrohRecvStream;
+    fn split(self) -> (Self::Send, Self::Recv) {
+        (self.send, self.recv)
+    }
+    fn alpn_protocol(&self) -> Option<&[u8]> {
+        None
+    }
+}

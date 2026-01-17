@@ -1018,6 +1018,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "futures-util",
+ "http",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "hash32"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1515,6 +1529,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "iroh-h3"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6764e7dcea06b88e5afc37572a39a989b41a2cc50e4c74e0039515329e125abf"
+dependencies = [
+ "bytes",
+ "futures",
+ "h3",
+ "iroh",
+ "tokio-util",
+]
+
+[[package]]
+name = "iroh-h3-axum"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f476590af37e94677624cff070f4a1f221915cdf506c12f72775ee24572a770"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures-lite",
+ "h3",
+ "http",
+ "http-body",
+ "iroh",
+ "iroh-h3",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
 name = "iroh-metrics"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1884,6 +1929,8 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "iroh",
+ "iroh-h3-axum",
+ "navar-h3",
  "navar-hyper",
  "navar-iroh",
  "navar-tokio",
@@ -1892,6 +1939,17 @@ dependencies = [
  "rustls-pemfile",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "navar-h3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "h3",
+ "navar",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

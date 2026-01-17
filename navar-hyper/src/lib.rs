@@ -13,7 +13,7 @@ use navar::{
     http::{Request, Response},
     http_body::Body,
     http_body_util::BodyExt,
-    transport::TransportIo,
+    transport::{BidiStream, Connection},
 };
 
 type DynBody = navar::http_body_util::combinators::BoxBody<
@@ -34,7 +34,7 @@ pub enum Protocol {
 }
 
 /// Helper to bridge navar/futures-lite IO to Tokio IO
-fn prepare_io<I: TransportIo>(io: I) -> TokioIo<Compat<I>> {
+fn prepare_io<I: BidiStream>(io: I) -> TokioIo<Compat<I>> {
     TokioIo::new(io.compat())
 }
 
@@ -105,14 +105,23 @@ impl HyperApp {
     }
 }
 
-impl ApplicationPlugin for HyperApp {
+impl<C> ApplicationPlugin<C> for HyperApp
+where
+    C: Connection,
+    C::Bidi: BidiStream + Unpin,
+{
     type Session = HyperSender;
 
     async fn handshake(
         &self,
-        io: impl TransportIo,
+        conn: C,
     ) -> anyhow::Result<(Self::Session, impl Future<Output = ()> + Send + 'static)> {
-        // 1. Determine which protocol to use
+        // 1. Obtain the stream from the connection handle.
+        // For TCP, this performs the actual socket dial.
+        // For Iroh/QUIC, this opens a bidirectional stream.
+        let io = conn.open_bidirectional().await?;
+
+        // 2. Determine which protocol to use based on ALPN (if available)
         let alpn = io.alpn_protocol();
 
         let use_h2 = match (self.protocol, alpn) {
@@ -123,16 +132,16 @@ impl ApplicationPlugin for HyperApp {
             (Protocol::Auto, _) => false,
         };
 
+        // 3. Wrap the stream in the Tokio compatibility layer
         let hyper_io = prepare_io(io);
 
-        // 2. Perform the handshake
+        // 4. Perform the Hyper handshake
         if use_h2 {
             let executor = TokioExecutor::new();
             let (sender, conn) = http2::Builder::new(executor).handshake(hyper_io).await?;
 
             let session = HyperSender::H2(sender);
 
-            // Box the driver future to erase the specific type (H1 vs H2 connection)
             let driver = Box::pin(async move {
                 if let Err(e) = conn.await {
                     eprintln!("Hyper H2 connection error: {:?}", e);

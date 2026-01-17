@@ -25,12 +25,11 @@ pub mod transport;
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A helper type alias to extract the response body type from the Application plugin.
-pub type ResponseBody<A> = <<A as ApplicationPlugin>::Session as Session>::ResBody;
+/// 
+/// Requires the Application type (A) and the Connection type (C) it acts upon.
+pub type ResponseBody<A, C> = <<A as ApplicationPlugin<C>>::Session as Session>::ResBody;
 
 /// Defines the runtime capabilities required by the client.
-///
-/// This allows the client to be runtime-agnostic (e.g., Tokio, async-std), provided
-/// the runtime can spawn background tasks.
 pub trait AsyncRuntime: Send + Sync + 'static {
     /// Spawns a future onto the background runtime.
     fn spawn<F>(&self, future: F)
@@ -39,12 +38,6 @@ pub trait AsyncRuntime: Send + Sync + 'static {
 }
 
 /// A composite trait that bundles all requirements for a request body.
-///
-/// This trait utilizes "lifted associated types" to ensure that any type implementing it
-/// automatically satisfies the `Send`, `Sync`, `Unpin`, and `'static` bounds, as well
-/// as ensuring the associated `Data` is `Send` and `Error` is convertible to `BoxError`.
-///
-/// This prevents the need to repeat these complex bounds on every function signature.
 pub trait RequestBody:
     Body<Data = <Self as RequestBody>::Data, Error = <Self as RequestBody>::Error>
     + Send
@@ -67,15 +60,13 @@ where
 }
 
 /// Defines the capability to dispatch HTTP requests.
-///
-/// This trait acts as the abstraction layer between the high-level `Client` interface
-/// and the low-level logic of connecting transports and performing application handshakes.
 pub trait Dispatch: Send + Sync + Clone {
-    /// The transport mechanism (e.g., TCP, TLS).
+    /// The transport mechanism (e.g., TCP, TLS, Iroh).
     type Transport: TransportPlugin;
 
-    /// The application protocol (e.g., HTTP/1.1, HTTP/2).
-    type App: ApplicationPlugin;
+    /// The application protocol (e.g., HTTP/1.1, HTTP/3).
+    /// This is now bound to accept the specific connection type produced by the Transport.
+    type App: ApplicationPlugin<<Self::Transport as TransportPlugin>::Conn>;
 
     /// The runtime environment.
     type Runtime: AsyncRuntime;
@@ -84,7 +75,7 @@ pub trait Dispatch: Send + Sync + Clone {
     fn send<B>(
         &self,
         request: Request<B>,
-    ) -> impl Future<Output = anyhow::Result<Response<ResponseBody<Self::App>>>> + Send
+    ) -> impl Future<Output = anyhow::Result<Response<ResponseBody<Self::App, <Self::Transport as TransportPlugin>::Conn>>>> + Send
     where
         B: RequestBody;
 }
@@ -96,10 +87,6 @@ struct ClientInner<T, A, R> {
 }
 
 /// The primary HTTP client.
-///
-/// This struct is the main entry point for users. It holds the configuration for
-/// transport, application protocol, and runtime. It is designed to be shared
-/// across threads and is cheaply clonable (wrapping its state in an `Arc`).
 pub struct Client<T, A, R> {
     inner: Arc<ClientInner<T, A, R>>,
 }
@@ -129,7 +116,8 @@ macro_rules! http_method {
 impl<T, A, R> Client<T, A, R>
 where
     T: TransportPlugin,
-    A: ApplicationPlugin,
+    // The App must accept the Connection type produced by the Transport
+    A: ApplicationPlugin<T::Conn>,
     R: AsyncRuntime,
 {
     /// Creates a new `Client` instance.
@@ -166,19 +154,22 @@ where
 impl<T, A, R> Dispatch for Client<T, A, R>
 where
     T: TransportPlugin,
-    A: ApplicationPlugin,
+    A: ApplicationPlugin<T::Conn>,
     R: AsyncRuntime,
 {
     type Transport = T;
     type App = A;
     type Runtime = R;
 
-    async fn send<B>(&self, req: Request<B>) -> anyhow::Result<Response<ResponseBody<Self::App>>>
+    async fn send<B>(&self, req: Request<B>) -> anyhow::Result<Response<ResponseBody<Self::App, T::Conn>>>
     where
         B: RequestBody,
     {
-        let io = self.inner.transport.connect(req.uri()).await?;
-        let (mut session, driver) = self.inner.app.handshake(io).await?;
+        // Get the Generic Connection (could be a Stream or a QUIC Session)
+        let conn = self.inner.transport.connect(req.uri()).await?;
+        
+        // Handshake consumes the connection
+        let (mut session, driver) = self.inner.app.handshake(conn).await?;
 
         self.inner.runtime.spawn(driver);
 
@@ -187,9 +178,6 @@ where
 }
 
 /// A builder for constructing an HTTP request.
-///
-/// This struct holds the partial request state (Method, URI, Headers) and the client,
-/// but waits for a body to be provided before the request can be finalized.
 pub struct BoundRequestBuilder<D: Dispatch> {
     inner: HttpBuilder,
     client: D,
@@ -197,8 +185,6 @@ pub struct BoundRequestBuilder<D: Dispatch> {
 
 impl<D: Dispatch> BoundRequestBuilder<D> {
     /// Attaches a body to the request.
-    ///
-    /// Consumes the builder and returns a `BoundRequest` ready for execution.
     pub fn body<B>(self, body: B) -> anyhow::Result<BoundRequest<B, D>>
     where
         B: RequestBody,
@@ -210,8 +196,6 @@ impl<D: Dispatch> BoundRequestBuilder<D> {
     }
 
     /// Attaches an empty body to the request.
-    ///
-    /// Consumes the builder and returns a `BoundRequest` ready for execution.
     pub fn build(self) -> anyhow::Result<BoundRequest<Empty<Bytes>, D>> {
         Ok(BoundRequest {
             request: self.inner.body(Empty::new())?,
@@ -221,8 +205,6 @@ impl<D: Dispatch> BoundRequestBuilder<D> {
 }
 
 /// A fully formed HTTP request awaiting execution.
-///
-/// This struct combines the valid `http::Request` with the `Client` capable of sending it.
 pub struct BoundRequest<B, D: Dispatch>
 where
     B: RequestBody,
@@ -237,10 +219,7 @@ where
     B: RequestBody,
 {
     /// Executes the HTTP request.
-    ///
-    /// This operation is asynchronous and will return the response (or an error)
-    /// once the round-trip is complete.
-    pub async fn send(self) -> anyhow::Result<Response<ResponseBody<D::App>>> {
+    pub async fn send(self) -> anyhow::Result<Response<ResponseBody<D::App, <D::Transport as TransportPlugin>::Conn>>> {
         self.client.send(self.request).await
     }
 }
