@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["navar-example","navar-hyper","navar-tokio"]
+members = ["navar-example","navar-hyper", "navar-iroh","navar-tokio"]
 
 [package]
 name = "navar"

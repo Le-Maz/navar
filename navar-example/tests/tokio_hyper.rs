@@ -38,6 +38,8 @@ fn generate_self_signed_cert() -> (Vec<u8>, rustls::ServerConfig) {
 }
 
 async fn with_server(app: axum::Router, use_tls: bool, run: impl AsyncFnOnce(&str, Option<&[u8]>)) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
 
