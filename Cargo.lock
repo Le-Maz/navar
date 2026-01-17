@@ -1856,21 +1856,14 @@ name = "navar"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "bytes",
  "futures-lite",
  "http",
  "http-body",
  "http-body-util",
-]
-
-[[package]]
-name = "navar-example"
-version = "0.1.0"
-dependencies = [
- "axum",
  "hyper-util",
  "iroh",
- "navar",
  "navar-hyper",
  "navar-iroh",
  "navar-tokio",
