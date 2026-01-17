@@ -1,0 +1,12 @@
+[package]
+name = "navar-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+navar = {path = ".."}
+navar-tokio = {path = "../navar-tokio"}
+navar-hyper = {path = "../navar-hyper"}
+tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros"] }
+axum = "0.8.8"

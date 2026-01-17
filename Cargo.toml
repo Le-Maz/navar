@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["navar-example","navar-hyper","navar-tokio"]
+
+[package]
+name = "navar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+bytes = "1.11"
+futures-lite = "2.6"
+http = "1.4"
+http-body = "1.0"
+http-body-util = "0.1.3"
