@@ -15,7 +15,7 @@
 
 use http::{Request, Response};
 use http_body::Body;
-use std::{fmt::Debug, future::Future};
+use std::future::Future;
 
 /// Represents an active application-layer session.
 ///
@@ -26,11 +26,13 @@ use std::{fmt::Debug, future::Future};
 ///
 /// # Error Handling
 ///
-/// The response body error type must be convertible into [`anyhow::Error`]
-/// to allow uniform error propagation across protocol boundaries.
+/// The response body error type must implement [`std::error::Error`], [`Send`],
+/// and [`Sync`] to ensure it can be propagated safely across threads and
+/// converted into common error types like [`anyhow::Error`].
 pub trait Session: Send + 'static
 where
-    <Self::ResBody as Body>::Error: Debug + Into<anyhow::Error>,
+    // UPDATED BOUNDS: Enforce standard error traits and thread safety.
+    <Self::ResBody as Body>::Error: std::error::Error + Send + Sync + 'static,
 {
     /// The response body type produced by this session.
     ///

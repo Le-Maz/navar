@@ -227,6 +227,34 @@ pub struct BoundRequestBuilder<D: Dispatch> {
 }
 
 impl<D: Dispatch> BoundRequestBuilder<D> {
+    /// Appends a header to the request.
+    ///
+    /// This method allows adding headers to the request before the body is set.
+    /// It wraps the standard [`http::request::Builder::header`] functionality.
+    pub fn header<K, V>(mut self, key: K, value: V) -> Self
+    where
+        http::header::HeaderName: TryFrom<K>,
+        <http::header::HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        http::header::HeaderValue: TryFrom<V>,
+        <http::header::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        self.inner = self.inner.header(key, value);
+        self
+    }
+
+    /// Adds an extension to the request's type map.
+    ///
+    /// Extensions are used to pass extra data (like open telemetry spans,
+    /// authentication tokens, or protocol-specific configuration) through
+    /// the request lifecycle.
+    pub fn extension<T>(mut self, extension: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.inner = self.inner.extension(extension);
+        self
+    }
+
     /// Attaches a body to the request.
     pub fn body<B>(self, body: B) -> anyhow::Result<BoundRequest<B, D>>
     where
