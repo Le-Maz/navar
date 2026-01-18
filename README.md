@@ -23,10 +23,7 @@ async fn simple_fetch() -> anyhow::Result<()> {
     );
 
     // 2. Send requests normally
-    let res = client
-        .get("https://www.rust-lang.org")
-        .send()
-        .await?;
+    let res = client.get("https://example.org").send().await?;
 
     println!("Status: {}", res.status());
     Ok(())
