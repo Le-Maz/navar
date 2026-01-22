@@ -15,11 +15,11 @@ use crate::{
 use bytes::Buf;
 use http::{Method, Request, Response, Uri};
 use http_body_util::{BodyExt, combinators::BoxBody};
-use std::future::Future;
 use std::sync::Arc;
 
 pub mod application;
 pub mod bound_request;
+pub mod service;
 pub mod transport;
 
 /// Helper type alias to extract the response body type from an application plugin.
