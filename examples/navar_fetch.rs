@@ -1,7 +1,7 @@
 use clap::Parser;
 use http::{Method, Uri};
 use http_body_util::BodyExt;
-use navar::{AsyncRuntime, Client, application::ApplicationPlugin, transport::TransportPlugin};
+use navar::Client;
 use navar_h3::H3App;
 use navar_hyper::HyperApp;
 use navar_iroh::IrohTransport;
@@ -85,12 +85,7 @@ async fn create_iroh_endpoint() -> anyhow::Result<iroh::Endpoint> {
 }
 
 /// Generic execution logic for any Navar Client configuration
-async fn exec_request<T, A, R>(client: Client<T, A, R>, args: &Config) -> anyhow::Result<()>
-where
-    R: AsyncRuntime,
-    T: TransportPlugin,
-    A: ApplicationPlugin<T::Conn>,
-{
+async fn exec_request(client: Client, args: &Config) -> anyhow::Result<()> {
     // Build the request
     let mut req_builder = client.request(args.method.clone(), args.uri.clone());
 

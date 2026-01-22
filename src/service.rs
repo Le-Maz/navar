@@ -5,10 +5,13 @@ use http::{Request, Response};
 
 use crate::NormalizedBody;
 
-pub type SendResult = anyhow::Result<Response<NormalizedBody>>;
+pub type ResponseResult = anyhow::Result<Response<NormalizedBody>>;
 
 pub trait Service: Send + Sync + 'static {
-    fn handle(&self, request: Request<NormalizedBody>) -> impl Future<Output = SendResult> + Send;
+    fn handle(
+        &self,
+        request: Request<NormalizedBody>,
+    ) -> impl Future<Output = ResponseResult> + Send;
 }
 
 pub trait IntoService: Send + Sync + 'static {
@@ -42,7 +45,7 @@ impl<M1: Middleware, M2: Middleware> Middleware for (M1, M2) {
 
 #[derive(Clone)]
 pub struct Pipeline {
-    handler: Arc<dyn Fn(Request<NormalizedBody>) -> Boxed<SendResult> + Send + Sync>,
+    handler: Arc<dyn Fn(Request<NormalizedBody>) -> Boxed<ResponseResult> + Send + Sync>,
 }
 
 impl Pipeline {
@@ -61,7 +64,7 @@ impl Pipeline {
 
 impl Service for Pipeline {
     #[inline]
-    async fn handle(&self, request: Request<NormalizedBody>) -> SendResult {
+    async fn handle(&self, request: Request<NormalizedBody>) -> ResponseResult {
         (self.handler)(request).await
     }
 }

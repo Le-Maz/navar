@@ -1,15 +1,12 @@
 use http::header::CONTENT_TYPE;
 use serde::Serialize;
 
-use crate::{
-    Dispatch,
-    bound_request::{BoundRequest, BoundRequestBuilder},
-};
+use crate::bound_request::{BoundRequest, BoundRequestBuilder};
 
-impl<D: Dispatch> BoundRequestBuilder<D> {
+impl BoundRequestBuilder {
     /// Attaches a JSON body to the request and sets Content-Type
     /// to "application/json" if the field is empty
-    pub fn json(mut self, value: &impl Serialize) -> anyhow::Result<BoundRequest<String, D>> {
+    pub fn json(mut self, value: &impl Serialize) -> anyhow::Result<BoundRequest<String>> {
         let serialized = serde_json::to_string(value)?;
         if self
             .inner

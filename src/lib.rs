@@ -9,13 +9,13 @@ pub use http_body_util;
 
 use crate::{
     application::{ApplicationPlugin, Session},
-    bound_request::{BoundRequestBuilder, RequestBody, SendRequestFuture, SendRequestResult},
+    bound_request::{BoundRequestBuilder, RequestBody},
+    service::{Pipeline, ResponseResult, Service},
     transport::TransportPlugin,
 };
 use bytes::Buf;
 use http::{Method, Request, Response, Uri};
 use http_body_util::{BodyExt, combinators::BoxBody};
-use std::sync::Arc;
 
 pub mod application;
 pub mod bound_request;
@@ -23,83 +23,73 @@ pub mod service;
 pub mod transport;
 
 /// Helper type alias to extract the response body type from an application plugin.
-///
-/// This resolves to the concrete response body returned by the application
-/// session associated with the given transport.
 pub type ResponseBody<A, C> = <<A as ApplicationPlugin<C>>::Session as Session>::ResBody;
 
 pub type NormalizedData = Box<dyn Buf + Send + Sync>;
 pub type NormalizedBody = BoxBody<NormalizedData, anyhow::Error>;
 
 /// Defines the async runtime capabilities required by the client.
-///
-/// This abstraction allows the client to remain runtime-agnostic
-/// (e.g. compatible with Tokio, async-std, or custom executors).
 pub trait AsyncRuntime: Send + Sync + 'static {
     /// Spawns a future onto the background runtime.
-    ///
-    /// The spawned future is expected to run independently for the
-    /// lifetime of the session or connection.
     fn spawn<F>(&self, future: F)
     where
-        F: Future<Output = ()> + Send + 'static;
+        F: std::future::Future<Output = ()> + Send + 'static;
 }
 
-/// Defines the capability to dispatch HTTP requests.
-///
-/// This trait ties together:
-///
-/// - A transport (connection establishment)
-/// - An application protocol (handshake + session)
-/// - A runtime (background task execution)
-pub trait Dispatch: Send + Sync + Clone {
-    /// The transport mechanism (e.g. TCP, TLS, QUIC).
-    type Transport: TransportPlugin;
-
-    /// The application protocol (e.g. HTTP/1.1, HTTP/2, HTTP/3).
-    ///
-    /// The application is parameterized by the connection type produced
-    /// by the transport.
-    type App: ApplicationPlugin<<Self::Transport as TransportPlugin>::Conn>;
-
-    /// The async runtime used for background tasks.
-    type Runtime: AsyncRuntime;
-
-    /// Connects to the remote peer, performs the application handshake,
-    /// and sends a single HTTP request.
-    fn send<B>(&self, request: Request<B>) -> impl SendRequestFuture<Self>
-    where
-        B: RequestBody;
-}
-
-struct ClientInner<T, A, R> {
+/// The core internal service that performs the actual network I/O.
+/// This implements the protocol handshake and request dispatching.
+struct BaseService<T, A, R> {
     transport: T,
     app: A,
     runtime: R,
 }
 
-/// The primary HTTP client.
-///
-/// `Client` is a lightweight, clonable handle that shares an internal
-/// transport, application plugin, and runtime.
-pub struct Client<T, A, R> {
-    inner: Arc<ClientInner<T, A, R>>,
+impl<T, A, R> Service for BaseService<T, A, R>
+where
+    T: TransportPlugin,
+    A: ApplicationPlugin<T::Conn>,
+    R: AsyncRuntime,
+{
+    async fn handle(
+        &self,
+        req: Request<NormalizedBody>,
+    ) -> anyhow::Result<Response<NormalizedBody>> {
+        // Establish a transport-level connection
+        let conn = self.transport.connect(req.uri()).await?;
+
+        // Perform the application-layer handshake
+        let (mut session, driver) = self.app.handshake(conn).await?;
+
+        // Drive the protocol in the background
+        self.runtime.spawn(driver);
+
+        // Send the request through the session
+        let (res_parts, res_body) = session.send_request(req).await?.into_parts();
+
+        // Normalize the response body to match the Service trait expectation
+        let res_body = res_body
+            .map_frame(|frame| frame.map_data(|data| Box::new(data) as NormalizedData))
+            .map_err(|err| err.into())
+            .boxed();
+
+        Ok(Response::from_parts(res_parts, res_body))
+    }
 }
 
-impl<T, A, R> Clone for Client<T, A, R> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
+/// The primary HTTP client.
+///
+/// `Client` is a lightweight handle that wraps a `Pipeline`.
+/// It is type-erased and does not require generic parameters.
+#[derive(Clone)]
+pub struct Client {
+    pipeline: Pipeline,
 }
 
 macro_rules! http_method {
     ($name:ident, $variant:expr) => {
         #[doc = concat!("Initiates a `", stringify!($variant), "` request to the given URI.")]
         #[inline]
-        pub fn $name<U>(&self, uri: U) -> BoundRequestBuilder<Self>
+        pub fn $name<U>(&self, uri: U) -> BoundRequestBuilder
         where
             U: TryInto<Uri>,
             http::Error: From<<U as TryInto<Uri>>::Error>,
@@ -109,34 +99,53 @@ macro_rules! http_method {
     };
 }
 
-impl<T, A, R> Client<T, A, R>
-where
-    T: TransportPlugin,
-    A: ApplicationPlugin<T::Conn>,
-    R: AsyncRuntime,
-{
-    /// Creates a new `Client`.
-    ///
-    /// The client is cheap to clone and may be reused for multiple requests.
+impl Client {
+    /// Creates a new `Client` wrapping a `BaseService` inside a `Pipeline`.
     #[inline]
-    pub fn new(transport: T, app: A, runtime: R) -> Self {
+    pub fn new<T, A, R>(transport: T, app: A, runtime: R) -> Self
+    where
+        T: TransportPlugin,
+        A: ApplicationPlugin<T::Conn>,
+        R: AsyncRuntime,
+    {
+        let base = BaseService {
+            transport,
+            app,
+            runtime,
+        };
         Self {
-            inner: Arc::new(ClientInner {
-                transport,
-                app,
-                runtime,
-            }),
+            pipeline: Pipeline::new(base),
         }
     }
 
     /// Creates a request builder with the specified HTTP method and URI.
     #[inline]
-    pub fn request<U>(&self, method: Method, uri: U) -> BoundRequestBuilder<Self>
+    pub fn request<U>(&self, method: Method, uri: U) -> BoundRequestBuilder
     where
         U: TryInto<Uri>,
         http::Error: From<<U as TryInto<Uri>>::Error>,
     {
         BoundRequestBuilder::new(self.clone(), method, uri)
+    }
+
+    /// Internal execution logic used by the request builders.
+    /// This replaces the Dispatch trait functionality.
+    pub async fn send<B>(&self, req: Request<B>) -> ResponseResult
+    where
+        B: RequestBody,
+    {
+        let (req_parts, req_body) = req.into_parts();
+
+        // Convert input body to NormalizedBody for the pipeline
+        let req_body = req_body
+            .map_frame(|frame| frame.map_data(|data| Box::new(data) as NormalizedData))
+            .map_err(|err| err.into())
+            .boxed();
+
+        let request = Request::from_parts(req_parts, req_body);
+
+        // Execute via the pipeline
+        self.pipeline.handle(request).await
     }
 
     http_method!(head, Method::HEAD);
@@ -145,39 +154,4 @@ where
     http_method!(put, Method::PUT);
     http_method!(patch, Method::PATCH);
     http_method!(delete, Method::DELETE);
-}
-
-impl<T, A, R> Dispatch for Client<T, A, R>
-where
-    T: TransportPlugin,
-    A: ApplicationPlugin<T::Conn>,
-    R: AsyncRuntime,
-{
-    type Transport = T;
-    type App = A;
-    type Runtime = R;
-
-    async fn send<B>(&self, req: Request<B>) -> SendRequestResult
-    where
-        B: RequestBody,
-    {
-        // Establish a transport-level connection
-        let conn = self.inner.transport.connect(req.uri()).await?;
-
-        // Perform the application-layer handshake
-        let (mut session, driver) = self.inner.app.handshake(conn).await?;
-
-        // Drive the protocol in the background
-        self.inner.runtime.spawn(driver);
-
-        // Send the request through the session
-        let (res_parts, res_body) = session.send_request(req).await?.into_parts();
-
-        let res_body = res_body
-            .map_frame(|frame| frame.map_data(|data| Box::new(data) as NormalizedData))
-            .map_err(|err| err.into())
-            .boxed();
-
-        Ok(Response::from_parts(res_parts, res_body))
-    }
 }
