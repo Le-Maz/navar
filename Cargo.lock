@@ -2026,6 +2026,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "dashmap",
  "futures-lite",
  "http",
  "http-body",
@@ -2073,8 +2074,6 @@ name = "navar-iroh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dashmap",
- "futures",
  "iroh",
  "navar",
  "tokio",

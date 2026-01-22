@@ -9,15 +9,17 @@ pub use http_body_util;
 
 use crate::{
     application::{ApplicationPlugin, Session},
+    base_service::BaseService,
     bound_request::{BoundRequestBuilder, RequestBody},
     service::{Pipeline, ResponseResult, Service},
     transport::TransportPlugin,
 };
 use bytes::Buf;
-use http::{Method, Request, Response, Uri};
+use http::{Method, Request, Uri};
 use http_body_util::{BodyExt, combinators::BoxBody};
 
 pub mod application;
+pub mod base_service;
 pub mod bound_request;
 pub mod service;
 pub mod transport;
@@ -34,46 +36,6 @@ pub trait AsyncRuntime: Send + Sync + 'static {
     fn spawn<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static;
-}
-
-/// The core internal service that performs the actual network I/O.
-/// This implements the protocol handshake and request dispatching.
-struct BaseService<T, A, R> {
-    transport: T,
-    app: A,
-    runtime: R,
-}
-
-impl<T, A, R> Service for BaseService<T, A, R>
-where
-    T: TransportPlugin,
-    A: ApplicationPlugin<T::Conn>,
-    R: AsyncRuntime,
-{
-    async fn handle(
-        &self,
-        req: Request<NormalizedBody>,
-    ) -> anyhow::Result<Response<NormalizedBody>> {
-        // Establish a transport-level connection
-        let conn = self.transport.connect(req.uri()).await?;
-
-        // Perform the application-layer handshake
-        let (mut session, driver) = self.app.handshake(conn).await?;
-
-        // Drive the protocol in the background
-        self.runtime.spawn(driver);
-
-        // Send the request through the session
-        let (res_parts, res_body) = session.send_request(req).await?.into_parts();
-
-        // Normalize the response body to match the Service trait expectation
-        let res_body = res_body
-            .map_frame(|frame| frame.map_data(|data| Box::new(data) as NormalizedData))
-            .map_err(|err| err.into())
-            .boxed();
-
-        Ok(Response::from_parts(res_parts, res_body))
-    }
 }
 
 /// The primary HTTP client.
@@ -108,13 +70,17 @@ impl Client {
         A: ApplicationPlugin<T::Conn>,
         R: AsyncRuntime,
     {
-        let base = BaseService {
-            transport,
-            app,
-            runtime,
-        };
+        let service = BaseService::new(transport, app, runtime);
         Self {
-            pipeline: Pipeline::new(base),
+            pipeline: Pipeline::new(service),
+        }
+    }
+
+    /// Creates a new `Client` with a given `Service`.
+    #[inline]
+    pub fn with_service(service: impl Service) -> Self {
+        Self {
+            pipeline: Pipeline::new(service),
         }
     }
 

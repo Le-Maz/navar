@@ -1,33 +1,15 @@
-//! # Iroh Transport Implementation
+//! # Iroh Transport Implementation (No Pooling)
 //!
 //! This module provides an implementation of the `navar` transport abstractions
 //! backed by the `iroh` QUIC endpoint.
-//!
-//! Features:
-//!
-//! - QUIC-based multiplexed transport
-//! - Connection reuse via an internal connection cache
-//! - Support for bidirectional and unidirectional streams
-//! - ALPN-based protocol negotiation
-//!
-//! Design notes:
-//!
-//! - Connections are keyed by `EndpointId` and shared across requests
-//! - Concurrent connection attempts are deduplicated using shared futures
-//! - Connection entries are automatically evicted when closed
 
 use std::{
-    ops::ControlFlow,
     pin::Pin,
     str::FromStr,
-    sync::Arc,
     task::{Context, Poll},
-    time::Duration,
 };
 
 use anyhow::Context as _;
-use dashmap::{DashMap, mapref::entry::Entry};
-use futures::{Future, FutureExt, future::Shared};
 use iroh::{
     EndpointId,
     endpoint::{Connection as QuicConnection, Endpoint},
@@ -39,12 +21,6 @@ use navar::{
 };
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-/// Boxed future used internally for connection establishment.
-type DynFuture = Pin<Box<dyn Future<Output = Result<QuicConnection, Arc<anyhow::Error>>> + Send>>;
-
-/// Shared future representing an in-flight connection attempt.
-type DialFuture = Shared<DynFuture>;
-
 /// Iroh-based transport plugin.
 ///
 /// This transport uses an [`iroh::Endpoint`] to establish QUIC connections
@@ -53,92 +29,12 @@ type DialFuture = Shared<DynFuture>;
 pub struct IrohTransport {
     endpoint: Endpoint,
     alpns: Vec<Vec<u8>>,
-    connection_cache: Arc<DashMap<EndpointId, DialFuture>>,
 }
 
 impl IrohTransport {
     /// Creates a new `IrohTransport`.
-    ///
-    /// - `endpoint`: The local Iroh endpoint
-    /// - `alpns`: Supported ALPN protocol identifiers
     pub fn new(endpoint: Endpoint, alpns: Vec<Vec<u8>>) -> Self {
-        Self {
-            endpoint,
-            alpns,
-            connection_cache: Arc::new(DashMap::new()),
-        }
-    }
-
-    /// Retrieves or establishes a connection to the given peer.
-    ///
-    /// Concurrent connection attempts to the same peer are deduplicated
-    /// using a shared future stored in the connection cache.
-    async fn get_connection(&self, peer_id: EndpointId) -> anyhow::Result<QuicConnection> {
-        loop {
-            let action = {
-                let entry = self.connection_cache.entry(peer_id);
-                match entry {
-                    Entry::Occupied(entry) => ControlFlow::Continue(entry.get().clone()),
-                    Entry::Vacant(entry) => {
-                        let future = self.create_dial_future(peer_id);
-                        entry.insert(future.clone());
-                        ControlFlow::Break(future)
-                    }
-                }
-            };
-
-            match action {
-                ControlFlow::Continue(shared_future) => match shared_future.await {
-                    Ok(conn) => return Ok(conn),
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                        continue;
-                    }
-                },
-                ControlFlow::Break(shared_future) => {
-                    return match shared_future.await {
-                        Ok(conn) => Ok(conn),
-                        Err(err) => {
-                            self.connection_cache.remove(&peer_id);
-                            Err(anyhow::anyhow!(err))
-                        }
-                    };
-                }
-            }
-        }
-    }
-
-    /// Creates a shared dialing future for a peer.
-    ///
-    /// The resulting connection is monitored, and the cache entry is
-    /// removed once the connection closes.
-    fn create_dial_future(&self, peer_id: EndpointId) -> DialFuture {
-        let endpoint = self.endpoint.clone();
-        let alpn = self
-            .alpns
-            .first()
-            .map(|v| v.as_slice())
-            .unwrap_or(b"n0/navar")
-            .to_vec();
-        let cache = self.connection_cache.clone();
-
-        let fut = async move {
-            let conn = endpoint
-                .connect(peer_id, &alpn)
-                .await
-                .map_err(|e| Arc::new(e.into()))?;
-
-            let monitor_conn = conn.clone();
-            tokio::spawn(async move {
-                let _ = monitor_conn.closed().await;
-                cache.remove(&peer_id);
-            });
-
-            Ok(conn)
-        };
-
-        let dyn_fut: DynFuture = Box::pin(fut);
-        dyn_fut.shared()
+        Self { endpoint, alpns }
     }
 }
 
@@ -147,11 +43,25 @@ impl TransportPlugin for IrohTransport {
 
     /// Connects to a remote peer identified by an Iroh public key.
     ///
-    /// The public key is extracted from the URI host component.
+    /// Every call to this method establishes a new QUIC connection.
     async fn connect(&self, uri: &Uri) -> anyhow::Result<Self::Conn> {
         let pubkey_str = uri.host().context("URI missing host")?;
         let remote_id = EndpointId::from_str(pubkey_str).context("Invalid Iroh Public Key")?;
-        let connection = self.get_connection(remote_id).await?;
+
+        // Use the first ALPN or a default
+        let alpn = self
+            .alpns
+            .first()
+            .map(|v| v.as_slice())
+            .unwrap_or(b"n0/navar");
+
+        // Establish a fresh connection directly
+        let connection = self
+            .endpoint
+            .connect(remote_id, alpn)
+            .await
+            .context("Failed to connect to iroh endpoint")?;
+
         Ok(IrohConnection { inner: connection })
     }
 }
@@ -193,7 +103,6 @@ impl Connection for IrohConnection {
         Ok(IrohRecvStream(recv.compat()))
     }
 
-    /// Returns the negotiated ALPN protocol.
     fn alpn_protocol(&self) -> Option<&[u8]> {
         Some(self.inner.alpn())
     }
@@ -289,12 +198,10 @@ impl BidiStream for IrohBidiStream {
     type Send = IrohSendStream;
     type Recv = IrohRecvStream;
 
-    /// Splits the bidirectional stream into send and receive halves.
     fn split(self) -> (Self::Send, Self::Recv) {
         (self.send, self.recv)
     }
 
-    /// ALPN is negotiated at the connection level.
     fn alpn_protocol(&self) -> Option<&[u8]> {
         None
     }

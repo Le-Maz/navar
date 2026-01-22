@@ -18,12 +18,13 @@
 //! The plugin produces a `Session` that can send HTTP requests and receive
 //! responses using Hyper’s client implementation.
 
-use std::future::Future;
 use std::pin::Pin;
+use std::{future::Future, sync::Arc};
 
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use navar::{NormalizedBody, NormalizedData};
+use tokio::sync::Mutex;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
 
 use navar::{
@@ -81,9 +82,10 @@ where
 }
 
 /// A unified HTTP sender wrapping either an HTTP/1.1 or HTTP/2 Hyper connection.
+#[derive(Clone)]
 pub enum HyperSender {
     /// HTTP/1.1 sender.
-    H1(http1::SendRequest<NormalizedBody>),
+    H1(Arc<Mutex<http1::SendRequest<NormalizedBody>>>),
 
     /// HTTP/2 sender.
     H2(http2::SendRequest<NormalizedBody>),
@@ -109,6 +111,7 @@ impl Session for HyperSender {
         // Dispatch based on the negotiated protocol
         match self {
             HyperSender::H1(sender) => {
+                let mut sender = sender.lock().await;
                 sender.ready().await?;
                 Ok(sender.send_request(req).await?)
             }
@@ -184,7 +187,7 @@ where
         } else {
             let (sender, conn) = http1::handshake(hyper_io).await?;
 
-            let session = HyperSender::H1(sender);
+            let session = HyperSender::H1(Arc::new(Mutex::new(sender)));
             let driver = Box::pin(async move {
                 if let Err(e) = conn.await {
                     eprintln!("Hyper HTTP/1.1 connection error: {:?}", e);

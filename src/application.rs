@@ -29,7 +29,7 @@ use std::future::Future;
 /// The response body error type must implement [`std::error::Error`], [`Send`],
 /// and [`Sync`] to ensure it can be propagated safely across threads and
 /// converted into common error types like [`anyhow::Error`].
-pub trait Session: Send + 'static
+pub trait Session: Clone + Send + 'static
 where
     <Self::ResBody as Body>::Error: std::error::Error + Send + Sync + 'static,
     <Self::ResBody as Body>::Data: Send + Sync,

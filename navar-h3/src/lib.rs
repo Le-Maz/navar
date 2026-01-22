@@ -65,6 +65,14 @@ pub struct H3Session<C: Connection> {
     sender: h3::client::SendRequest<H3Connection<C>, Bytes>,
 }
 
+impl<C: Connection> Clone for H3Session<C> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
 impl<C: Connection> Session for H3Session<C> {
     type ResBody = H3ResponseBody<C>;
 
