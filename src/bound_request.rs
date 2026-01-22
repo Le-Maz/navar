@@ -5,6 +5,9 @@ use http_body::Body;
 use http_body_util::Empty;
 use std::future::Future;
 
+#[cfg(feature = "json")]
+pub mod json;
+
 /// A composite trait defining the requirements for HTTP request bodies.
 ///
 /// This trait unifies the bounds needed by the client and application layers,
