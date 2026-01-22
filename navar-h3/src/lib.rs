@@ -16,7 +16,6 @@ use std::{
 
 use adapter::{H3BidiStream, H3Connection};
 use navar::{
-    BoxError,
     application::{ApplicationPlugin, Session},
     bytes::{Buf, Bytes},
     http::{Request, Response},
@@ -75,13 +74,13 @@ impl<C: Connection> Session for H3Session<C> {
     ) -> anyhow::Result<Response<Self::ResBody>>
     where
         B: Body + Send + Sync + 'static + Unpin,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
+        B::Data: Send + Sync,
+        B::Error: Into<anyhow::Error>,
     {
         let (parts, body) = request.into_parts();
         let req = Request::from_parts(parts, ());
         let mut stream = self.sender.send_request(req).await?;
-        let mut body = body.map_err(Into::into);
+        let mut body = body.map_err(|err| err.into());
 
         while let Some(frame_res) = body.frame().await {
             match frame_res {
@@ -93,9 +92,9 @@ impl<C: Connection> Session for H3Session<C> {
                     }
                 }
                 Err(err) => {
-                    return Err(anyhow::Error::from_boxed(err));
+                    return Err(err.into());
                 }
-            }
+            };
         }
 
         stream.finish().await?;
@@ -110,7 +109,7 @@ impl<C: Connection> Session for H3Session<C> {
 /// This is required because `Box<dyn Error ...>` does not automatically
 /// implement `Error`, and `anyhow::Error` does not implement `Error`.
 #[derive(Debug)]
-pub struct H3Error(BoxError);
+pub struct H3Error(anyhow::Error);
 
 impl std::fmt::Display for H3Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

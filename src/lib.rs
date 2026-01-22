@@ -1,5 +1,4 @@
 #![doc = include_str!("../README.md")]
-#![feature(never_type)]
 
 pub use anyhow;
 pub use bytes;
@@ -13,7 +12,9 @@ use crate::{
     bound_request::{BoundRequestBuilder, RequestBody, SendRequestFuture, SendRequestResult},
     transport::TransportPlugin,
 };
-use http::{Method, Request, Uri};
+use bytes::Buf;
+use http::{Method, Request, Response, Uri};
+use http_body_util::{BodyExt, combinators::BoxBody};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -21,17 +22,14 @@ pub mod application;
 pub mod bound_request;
 pub mod transport;
 
-/// A standard boxed error type used throughout the client.
-///
-/// This type is used as the common error representation for request bodies
-/// and protocol layers.
-pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
 /// Helper type alias to extract the response body type from an application plugin.
 ///
 /// This resolves to the concrete response body returned by the application
 /// session associated with the given transport.
 pub type ResponseBody<A, C> = <<A as ApplicationPlugin<C>>::Session as Session>::ResBody;
+
+pub type NormalizedData = Box<dyn Buf + Send + Sync>;
+pub type NormalizedBody = BoxBody<NormalizedData, anyhow::Error>;
 
 /// Defines the async runtime capabilities required by the client.
 ///
@@ -159,7 +157,7 @@ where
     type App = A;
     type Runtime = R;
 
-    async fn send<B>(&self, req: Request<B>) -> SendRequestResult<Self>
+    async fn send<B>(&self, req: Request<B>) -> SendRequestResult
     where
         B: RequestBody,
     {
@@ -173,6 +171,13 @@ where
         self.inner.runtime.spawn(driver);
 
         // Send the request through the session
-        session.send_request(req).await
+        let (res_parts, res_body) = session.send_request(req).await?.into_parts();
+
+        let res_body = res_body
+            .map_frame(|frame| frame.map_data(|data| Box::new(data) as NormalizedData))
+            .map_err(|err| err.into())
+            .boxed();
+
+        Ok(Response::from_parts(res_parts, res_body))
     }
 }

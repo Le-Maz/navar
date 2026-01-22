@@ -1,4 +1,4 @@
-use crate::{BoxError, Dispatch, ResponseBody, transport::TransportPlugin};
+use crate::{Dispatch, NormalizedBody};
 use bytes::Buf;
 use http::{Method, Request, Response, Uri, request::Builder as HttpBuilder};
 use http_body::Body;
@@ -20,36 +20,33 @@ pub trait RequestBody:
     + 'static
 {
     /// The data chunk type produced by the body.
-    type Data: Send;
+    type Data: Send + Sync;
 
     /// The error type produced by the body.
-    type Error: Into<BoxError>;
+    type Error: Into<anyhow::Error>;
 }
 
 /// Blanket implementation for all compatible body types.
 impl<B> RequestBody for B
 where
     B: Body + Send + Sync + Unpin + 'static,
-    B::Data: Send,
-    B::Error: Into<BoxError>,
+    B::Data: Send + Sync,
+    B::Error: Into<anyhow::Error>,
 {
     type Data = B::Data;
     type Error = B::Error;
 }
 
 /// Result type returned when sending an HTTP request.
-#[allow(type_alias_bounds)]
-pub type SendRequestResult<D: Dispatch> =
-    anyhow::Result<Response<ResponseBody<D::App, <D::Transport as TransportPlugin>::Conn>>>;
+pub type SendRequestResult = anyhow::Result<Response<NormalizedBody>>;
 
 /// A future returned by [`Dispatch::send`].
 ///
 /// This trait exists to provide a named abstraction over the returned future
 /// without boxing.
-pub trait SendRequestFuture<D: Dispatch>: Future<Output = SendRequestResult<D>> + Send {}
+pub trait SendRequestFuture<D: Dispatch>: Future<Output = SendRequestResult> + Send {}
 
-impl<F, D: Dispatch> SendRequestFuture<D> for F where F: Future<Output = SendRequestResult<D>> + Send
-{}
+impl<F, D: Dispatch> SendRequestFuture<D> for F where F: Future<Output = SendRequestResult> + Send {}
 
 pub enum NeverBuf {}
 
@@ -131,7 +128,7 @@ impl<D: Dispatch> BoundRequestBuilder<D> {
     }
 
     /// Builds and immediately sends the request.
-    pub async fn send(self) -> SendRequestResult<D> {
+    pub async fn send(self) -> SendRequestResult {
         self.build()?.send().await
     }
 }
@@ -151,7 +148,7 @@ where
     B: RequestBody,
 {
     /// Executes the HTTP request.
-    pub async fn send(self) -> SendRequestResult<D> {
+    pub async fn send(self) -> SendRequestResult {
         self.client.send(self.request).await
     }
 }

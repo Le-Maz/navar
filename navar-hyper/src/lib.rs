@@ -19,13 +19,11 @@
 //! responses using Hyper’s client implementation.
 
 use std::future::Future;
-use std::{error::Error as StdError, pin::Pin};
+use std::pin::Pin;
 
-use hyper::{
-    body::Buf,
-    client::conn::{http1, http2},
-};
+use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use navar::{NormalizedBody, NormalizedData};
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
 
 use navar::{
@@ -35,12 +33,6 @@ use navar::{
     http_body_util::BodyExt,
     transport::{BidiStream, Connection},
 };
-
-/// Boxed HTTP body type used for outgoing Hyper requests.
-type DynBody = navar::http_body_util::combinators::BoxBody<
-    navar::bytes::Bytes,
-    Box<dyn StdError + Send + Sync>,
->;
 
 /// Response body type returned by Hyper.
 type HyperResBody = hyper::body::Incoming;
@@ -77,13 +69,13 @@ fn prepare_io<I: BidiStream>(io: I) -> TokioIo<Compat<I>> {
 ///
 /// This ensures a uniform body representation regardless of the original
 /// body type used by the caller.
-fn convert_body<B>(body: B) -> DynBody
+fn convert_body<B>(body: B) -> NormalizedBody
 where
     B: Body + Send + Sync + Unpin + 'static,
-    B::Data: Send,
-    B::Error: Into<Box<dyn StdError + Send + Sync + 'static>>,
+    B::Data: Send + Sync,
+    B::Error: Into<anyhow::Error>,
 {
-    body.map_frame(|frame| frame.map_data(|mut data| data.copy_to_bytes(data.remaining())))
+    body.map_frame(|frame| frame.map_data(|data| Box::new(data) as NormalizedData))
         .map_err(|e| e.into())
         .boxed()
 }
@@ -91,10 +83,10 @@ where
 /// A unified HTTP sender wrapping either an HTTP/1.1 or HTTP/2 Hyper connection.
 pub enum HyperSender {
     /// HTTP/1.1 sender.
-    H1(http1::SendRequest<DynBody>),
+    H1(http1::SendRequest<NormalizedBody>),
 
     /// HTTP/2 sender.
-    H2(http2::SendRequest<DynBody>),
+    H2(http2::SendRequest<NormalizedBody>),
 }
 
 impl Session for HyperSender {
@@ -106,8 +98,8 @@ impl Session for HyperSender {
     ) -> anyhow::Result<Response<Self::ResBody>>
     where
         B: Body + Send + Sync + Unpin + 'static,
-        B::Data: Send,
-        B::Error: Into<Box<dyn StdError + Send + Sync + 'static>>,
+        B::Data: Send + Sync,
+        B::Error: Into<anyhow::Error>,
     {
         // Convert the request body into the boxed Hyper body type
         let (parts, body) = request.into_parts();

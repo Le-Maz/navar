@@ -31,14 +31,14 @@ use std::future::Future;
 /// converted into common error types like [`anyhow::Error`].
 pub trait Session: Send + 'static
 where
-    // UPDATED BOUNDS: Enforce standard error traits and thread safety.
     <Self::ResBody as Body>::Error: std::error::Error + Send + Sync + 'static,
+    <Self::ResBody as Body>::Data: Send + Sync,
 {
     /// The response body type produced by this session.
     ///
     /// This body represents the payload of responses returned by
     /// [`send_request`](Self::send_request).
-    type ResBody: Body + Send + 'static;
+    type ResBody: Body + Send + Sync + 'static;
 
     /// Sends a request and asynchronously returns the corresponding response.
     ///
@@ -60,8 +60,8 @@ where
     ) -> impl Future<Output = anyhow::Result<Response<Self::ResBody>>> + Send
     where
         B: Body + Send + Sync + 'static + Unpin,
-        B::Data: Send,
-        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>;
+        B::Data: Send + Sync,
+        B::Error: Into<anyhow::Error>;
 }
 
 /// A generic application-layer plugin.
