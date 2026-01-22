@@ -49,8 +49,8 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn new(service: impl Service + Send + Sync + 'static) -> Self {
-        let service = Arc::new(service);
+    pub fn new(service: impl IntoService) -> Self {
+        let service = Arc::new(service.into_service());
         Self {
             handler: Arc::new({
                 move |request| {
