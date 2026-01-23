@@ -1,8 +1,10 @@
 use crate::{Client, service::ResponseResult};
-use bytes::Buf;
-use http::{Method, Request, Uri, request::Builder as HttpBuilder};
+use bytes::{Buf, Bytes};
+use http::{
+    HeaderValue, Method, Request, Uri, header::CONTENT_TYPE, request::Builder as HttpBuilder,
+};
 use http_body::Body;
-use http_body_util::Empty;
+use http_body_util::{Empty, Full};
 
 #[cfg(feature = "json")]
 pub mod json;
@@ -99,6 +101,35 @@ impl BoundRequestBuilder {
             request: self.inner.body(Empty::new())?,
             client: self.client,
         })
+    }
+
+    /// Ensures that the request has a `Content-Type` header set.
+    fn ensure_content_type(mut self, value: HeaderValue) -> Self {
+        if self
+            .inner
+            .headers_ref()
+            .is_none_or(|headers| headers.get(CONTENT_TYPE).is_none())
+        {
+            self.inner = self.inner.header(CONTENT_TYPE, value);
+        }
+        self
+    }
+
+    /// Sets the request body to the given UTF-8 text.
+    pub fn text(self, text: impl AsRef<str>) -> anyhow::Result<BoundRequest<Full<Bytes>>> {
+        const MIME_TEXT: HeaderValue = HeaderValue::from_static("text/plain; charset=utf-8");
+
+        let body_bytes = Bytes::copy_from_slice(text.as_ref().as_bytes());
+        self.ensure_content_type(MIME_TEXT)
+            .body(Full::new(body_bytes))
+    }
+
+    /// Sets the request body to the given binary bytes.
+    pub fn bytes(self, bytes: impl Into<Bytes>) -> anyhow::Result<BoundRequest<Full<Bytes>>> {
+        const MIME_BIN: HeaderValue = HeaderValue::from_static("application/octet-stream");
+
+        self.ensure_content_type(MIME_BIN)
+            .body(Full::new(bytes.into()))
     }
 
     /// Builds and immediately sends the request.
