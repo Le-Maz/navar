@@ -2,9 +2,10 @@
 name = "navar-iroh"
 version = "0.1.0"
 edition = "2024"
+readme = "../README.md"
 
 [dependencies]
-navar = { path = ".." }
+navar = { version = "0.1.0", path = ".." }
 iroh = "0.95.1"
 tokio = { version = "1", features = ["sync"] }
 anyhow = "1.0"

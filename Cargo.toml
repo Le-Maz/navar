@@ -6,6 +6,10 @@ members = ["navar-h3", "navar-hyper", "navar-iroh", "navar-mocks", "navar-tokio"
 name = "navar"
 version = "0.1.0"
 edition = "2024"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+description = "Modular, transport-agnostic high-level HTTP client for Rust"
+repository = "https://github.com/Le-Maz/navar"
 
 [features]
 default = ["json"]

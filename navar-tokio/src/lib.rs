@@ -22,6 +22,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::Context as _;
+#[cfg(feature = "tls")]
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::{
     TcpStream,

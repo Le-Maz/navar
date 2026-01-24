@@ -2,9 +2,10 @@
 name = "navar-h3"
 version = "0.1.0"
 edition = "2024"
+readme = "../README.md"
 
 [dependencies]
-navar = { path = ".." }
+navar = { version = "0.1.0", path = ".." }
 tokio = { version = "1", features = ["rt"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 anyhow = "1.0"

@@ -2,9 +2,10 @@
 name = "navar-hyper"
 version = "0.1.0"
 edition = "2024"
+readme = "../README.md"
 
 [dependencies]
-navar = { path = ".." }
+navar = { version = "0.1.0", path = ".." }
 hyper = { version = "1.0", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio = { version = "1", features = ["rt"] }
