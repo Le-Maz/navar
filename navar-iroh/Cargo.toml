@@ -3,6 +3,8 @@ name = "navar-iroh"
 version = "0.1.0"
 edition = "2024"
 readme = "../README.md"
+license = "MIT OR Apache-2.0"
+description = "Modular, transport-agnostic high-level HTTP client for Rust"
 
 [dependencies]
 navar = { version = "0.1.0", path = ".." }
