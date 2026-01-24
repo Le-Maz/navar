@@ -11,7 +11,7 @@ use crate::{
     application::{ApplicationPlugin, Session},
     base_service::BaseService,
     bound_request::{BoundRequestBuilder, RequestBody},
-    service::{Pipeline, ResponseResult, Service},
+    service::{IntoService, Pipeline, ResponseResult, Service},
     transport::TransportPlugin,
 };
 use bytes::Buf;
@@ -21,9 +21,9 @@ use http_body_util::{BodyExt, combinators::BoxBody};
 pub mod application;
 pub mod base_service;
 pub mod bound_request;
+pub mod response_helpers;
 pub mod service;
 pub mod transport;
-pub mod response_helpers;
 
 /// Helper type alias to extract the response body type from an application plugin.
 pub type ResponseBody<A, C> = <<A as ApplicationPlugin<C>>::Session as Session>::ResBody;
@@ -77,9 +77,9 @@ impl Client {
         }
     }
 
-    /// Creates a new `Client` with a given `Service`.
+    /// Creates a new `Client` with a given `IntoService`.
     #[inline]
-    pub fn with_service(service: impl Service) -> Self {
+    pub fn with_service(service: impl IntoService) -> Self {
         Self {
             pipeline: Pipeline::new(service),
         }
