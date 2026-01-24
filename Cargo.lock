@@ -2037,6 +2037,7 @@ dependencies = [
  "navar-h3",
  "navar-hyper",
  "navar-iroh",
+ "navar-mocks",
  "navar-tokio",
  "rcgen",
  "rustls",
@@ -2044,6 +2045,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "tracing",
 ]
 
 [[package]]
@@ -2078,6 +2080,13 @@ dependencies = [
  "navar",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "navar-mocks"
+version = "0.1.0"
+dependencies = [
+ "navar",
 ]
 
 [[package]]

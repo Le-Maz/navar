@@ -54,6 +54,7 @@ pub struct BoundRequestBuilder {
 }
 
 impl BoundRequestBuilder {
+    #[inline]
     pub fn new<U>(client: Client, method: Method, uri: U) -> Self
     where
         U: TryInto<Uri>,
@@ -64,6 +65,7 @@ impl BoundRequestBuilder {
     }
 
     /// Appends a header to the request.
+    #[inline]
     pub fn header<K, V>(mut self, key: K, value: V) -> Self
     where
         http::header::HeaderName: TryFrom<K>,
@@ -76,6 +78,7 @@ impl BoundRequestBuilder {
     }
 
     /// Adds an extension to the request's type map.
+    #[inline]
     pub fn extension<T>(mut self, extension: T) -> Self
     where
         T: Clone + Send + Sync + 'static,
@@ -85,6 +88,7 @@ impl BoundRequestBuilder {
     }
 
     /// Attaches a body to the request.
+    #[inline]
     pub fn body<B>(self, body: B) -> anyhow::Result<BoundRequest<B>>
     where
         B: RequestBody,
@@ -96,6 +100,7 @@ impl BoundRequestBuilder {
     }
 
     /// Builds the request with an empty body.
+    #[inline]
     pub fn build(self) -> anyhow::Result<BoundRequest<Empty<NeverBuf>>> {
         Ok(BoundRequest {
             request: self.inner.body(Empty::new())?,
@@ -152,7 +157,43 @@ where
     B: RequestBody,
 {
     /// Executes the HTTP request via the bound Client.
+    #[inline]
     pub async fn send(self) -> ResponseResult {
         self.client.send(self.request).await
+    }
+
+    #[inline]
+    pub fn version(&self) -> http::Version {
+        self.request.version()
+    }
+
+    #[inline]
+    pub fn method(&self) -> &Method {
+        self.request.method()
+    }
+
+    #[inline]
+    pub fn uri(&self) -> &Uri {
+        self.request.uri()
+    }
+
+    #[inline]
+    pub fn body(&self) -> &B {
+        self.request.body()
+    }
+
+    #[inline]
+    pub fn into_body(self) -> B {
+        self.request.into_body()
+    }
+
+    #[inline]
+    pub fn headers(&self) -> &http::HeaderMap<HeaderValue> {
+        self.request.headers()
+    }
+
+    #[inline]
+    pub fn extensions(&self) -> &http::Extensions {
+        self.request.extensions()
     }
 }

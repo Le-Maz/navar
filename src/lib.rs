@@ -23,6 +23,7 @@ pub mod base_service;
 pub mod bound_request;
 pub mod service;
 pub mod transport;
+pub mod response_helpers;
 
 /// Helper type alias to extract the response body type from an application plugin.
 pub type ResponseBody<A, C> = <<A as ApplicationPlugin<C>>::Session as Session>::ResBody;

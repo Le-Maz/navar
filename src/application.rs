@@ -31,7 +31,7 @@ use std::future::Future;
 /// converted into common error types like [`anyhow::Error`].
 pub trait Session: Clone + Send + 'static
 where
-    <Self::ResBody as Body>::Error: std::error::Error + Send + Sync + 'static,
+    <Self::ResBody as Body>::Error: Into<anyhow::Error> + Send + Sync + 'static,
     <Self::ResBody as Body>::Data: Send + Sync,
 {
     /// The response body type produced by this session.
