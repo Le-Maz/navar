@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["navar-h3", "navar-hyper", "navar-iroh", "navar-mocks", "navar-tokio"]
+members = [
+    "navar-h3",
+    "navar-hyper",
+    "navar-iroh",
+    "navar-mocks",
+    "navar-tokio",
+]
 
 [package]
 name = "navar"
@@ -33,7 +39,7 @@ navar-iroh = { path = "./navar-iroh" }
 navar-hyper = { path = "./navar-hyper" }
 navar-h3 = { path = "./navar-h3" }
 navar-mocks = { path = "./navar-mocks" }
-iroh-h3-axum = "0.1.0"
+iroh-h3-axum = "0.3.0"
 tokio = { version = "1.49.0", features = [
     "rt",
     "rt-multi-thread",
@@ -45,5 +51,5 @@ tokio-rustls = "0.26.4"
 rustls = "0.23.36"
 rcgen = "0.14.7"
 hyper-util = "0.1.19"
-iroh = "0.95.1"
+iroh = "0.97.0"
 clap = { version = "4.5.54", features = ["derive"] }

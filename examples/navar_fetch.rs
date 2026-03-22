@@ -1,6 +1,7 @@
 use clap::Parser;
 use http::{Method, Uri};
 use http_body_util::BodyExt;
+use iroh::endpoint::presets::N0;
 use navar::Client;
 use navar_h3::H3App;
 use navar_hyper::HyperApp;
@@ -79,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Helper to initialize a standard Iroh Endpoint
 async fn create_iroh_endpoint() -> anyhow::Result<iroh::Endpoint> {
-    let endpoint = iroh::Endpoint::builder().bind().await?;
+    let endpoint = iroh::Endpoint::bind(N0).await?;
     endpoint.online().await;
     Ok(endpoint)
 }
